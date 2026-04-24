@@ -2,10 +2,19 @@
 
 ## Reporting a vulnerability
 
-Please report any found security vulnerability directly to me at xanatosdavid[at]gmail.com or through the [Report a vulnerability](https://github.com/sandboxie-plus/Sandboxie/security/advisories/new) form provided by GitHub. Please describe the issue in full detail and, if possible, include a proof of concept exploit.
-Please do not submit unverified AI-generated reports. While they may appear valid at first glance, they are often incorrect and end up wasting valuable time.
+1. Please report any found security vulnerability directly to me at xanatosdavid[at]gmail.com or through the [Report a vulnerability](https://github.com/sandboxie-plus/Sandboxie/security/advisories/new) form provided by GitHub.
+
+2. Please describe the issue in full detail and, if possible, include a proof of concept exploit.
+
+3. Please do not submit unverified AI-generated reports. While they may appear valid at first glance, they are often incorrect and end up wasting valuable time.
 
 ## Fixed vulnerabilities
+
+### SECURITY ISSUE ID-32
+EditPassword hash entropy loss: new passwords will be salted SHA-256 and base64-encoded
+- Note: existing passwords remain weak
+
+fixed in: 1.17.3 / 5.72.3
 
 ### SECURITY ISSUE ID-31 (thanks pentester.z)
 Missing parameter validation within named syscall invocation when using WoW64
