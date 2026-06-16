@@ -113,6 +113,7 @@ struct SBoxBorder
 
 	ULONG ActivePid;
 	HWND ActiveWnd;
+	ULONG ActiveExStyle;
 	RECT ActiveRect;
 	RECT TitleRect;
 	int  TitleState;
@@ -705,6 +706,7 @@ void CBoxBorder::ThreadFunc()
 
 	m->ActivePid = 0;
 	m->ActiveWnd = NULL;
+	m->ActiveExStyle = 0;
 	m->CurrentTimerIntervalMs = kAdaptiveFastMs;
 	m->AdaptiveOtherModeMs = kAdaptiveFastMs;
 	m->AdaptiveGlobalAllModeCheckMs = kAdaptiveFastMs;
@@ -1082,10 +1084,12 @@ void CBoxBorder::TimerProc()
 
 	HWND hWnd = foregroundForTick;
 	ULONG Style = hWnd ? GetWindowLong(hWnd, GWL_STYLE) : 0;
+	ULONG ExStyle = hWnd ? GetWindowLong(hWnd, GWL_EXSTYLE) : 0;
 	if (!hWnd || !(Style & WS_VISIBLE)) {
 		HideBorderWindow(m->MainBorder);
 		return;
 	}
+	bool topMostStateChanged = ((ExStyle ^ m->ActiveExStyle) & WS_EX_TOPMOST) != 0;
 	ULONG pid = 0;
 	GetWindowThreadProcessId(hWnd, &pid);
 
@@ -1145,6 +1149,7 @@ void CBoxBorder::TimerProc()
 	{
 		m->ActiveWnd = NULL;
 		m->ActivePid = 0;
+		m->ActiveExStyle = 0;
 		HideBorderWindow(m->MainBorder);
 	}
 	else
@@ -1154,7 +1159,7 @@ void CBoxBorder::TimerProc()
 
 		if (pid == m->ActivePid && hWnd == m->ActiveWnd) {
 			if (RectEquals(rect, m->ActiveRect)) {
-				if (!m->TitleState || m->TitleState == (CheckMousePointer() ? 1 : -1)) {
+				if ((!topMostStateChanged) && (!m->TitleState || m->TitleState == (CheckMousePointer() ? 1 : -1))) {
 					// Affinity may have changed even if geometry is unchanged; apply now so we don't
 					// need to wait for a move/resize event to pick up a CoverBoxedWindows/HideBordersFromCapture change.
 					if (hideBordersFromCapture != m->MainBorder.affinityEnabled) {
@@ -1187,6 +1192,7 @@ void CBoxBorder::TimerProc()
 
 		m->ActiveWnd = hWnd;
 		m->ActivePid = pid;
+		m->ActiveExStyle = ExStyle;
 		memcpy(&m->ActiveRect, &rect, sizeof(RECT));
 		m->TitleState = 0;
 		if (rect.right - rect.left <= 2 || rect.bottom - rect.top <= 2)
@@ -1284,6 +1290,35 @@ void CBoxBorder::TimerProc()
 		if (!hrgnBorder)
 			return; // GDI region combination failed; leave border as-is for this tick
 
+		// Apply BorderExcludeTaskbar clipping, matching the all-mode path.
+		// Skip when the window is topmost: topmost windows sit above the taskbar, so
+		// clipping the border region would misalign it with the window edge.
+		{
+			bool globalBorderExcludeTaskbar = m_Api->GetGlobalSettings()->GetBool("BorderExcludeTaskbar", true);
+			bool excludeTaskbar = pProcessBox ? pProcessBox->GetBool("BorderExcludeTaskbar", globalBorderExcludeTaskbar) : globalBorderExcludeTaskbar;
+			if (excludeTaskbar && !(ExStyle & WS_EX_TOPMOST))
+			{
+				HRGN hrgnTaskbar = CreateRectRgn(0, 0, 0, 0);
+				if (hrgnTaskbar)
+				{
+					MergeTaskbarOcclusionIntoCoveredRegion(hrgnTaskbar);
+					// Convert from screen coordinates to window-relative coordinates.
+					OffsetRgn(hrgnTaskbar, -windowRect.left, -windowRect.top);
+					if (CombineRgn(hrgnBorder, hrgnBorder, hrgnTaskbar, RGN_DIFF) == ERROR)
+					{
+						DeleteObject(hrgnTaskbar);
+						DeleteObject(hrgnBorder);
+						hrgnBorder = NULL;
+					}
+					else
+						DeleteObject(hrgnTaskbar);
+				}
+			}
+		}
+
+		if (!hrgnBorder)
+			return; // taskbar clipping region combination failed; leave border as-is for this tick
+
 		// Position and show the border window.
 		// Keep SWP_NOZORDER during stable focus mode so we don't permanently fight other
 		// always-on-top overlays.  Temporarily re-raise only for a short click/focus
@@ -1294,7 +1329,8 @@ void CBoxBorder::TimerProc()
 		m->MainBorder.affinityEnabled = hideBordersFromCapture;
 		bool focusRaisePulseActive = m->FocusRaisePulseStartTick &&
 			(now - m->FocusRaisePulseStartTick <= (DWORD)kFocusRaisePulseMs);
-		bool raiseDuringInteraction = focusRaisePulseActive;
+		bool raiseDuringInteraction = focusRaisePulseActive || !m->MainBorder.visible || topMostStateChanged;
+		HWND raiseInsertAfter = (ExStyle & WS_EX_TOPMOST) ? HWND_TOPMOST : HWND_TOP;
 		DWORD mainSwpFlags = SWP_NOACTIVATE;
 		if (!raiseDuringInteraction)
 			mainSwpFlags |= SWP_NOZORDER;
@@ -1318,7 +1354,7 @@ void CBoxBorder::TimerProc()
 
 		if (needSetWindowPos)
 		{
-			SetWindowPos(m->MainBorder.hWnd, raiseDuringInteraction ? HWND_TOP : NULL,
+			SetWindowPos(m->MainBorder.hWnd, raiseDuringInteraction ? raiseInsertAfter : NULL,
 				windowRect.left, windowRect.top,
 				windowRect.right - windowRect.left,
 				windowRect.bottom - windowRect.top,
@@ -1681,6 +1717,7 @@ void CBoxBorder::DrawAllSandboxedBorders()
 		HashMix64(sceneHash, (ULONGLONG)(LONG_PTR)wnd.rect.bottom);
 		HashMix64(sceneHash, (ULONGLONG)(ULONG_PTR)wnd.pBox);
 		HashMix64(sceneHash, (ULONGLONG)wnd.zOrder);
+		HashMix64(sceneHash, (ULONGLONG)((wnd.exStyle & WS_EX_TOPMOST) ? 1ULL : 0ULL)); // topmost flips affect clipping/z-order decisions
 		if (wnd.pBox)
 		{
 			const SAllStyle& style = getAllStyleForBox(wnd.pBox);
@@ -1837,6 +1874,7 @@ void CBoxBorder::DrawAllSandboxedBorders()
 				HashMix64(perWindowHash, (ULONGLONG)(style.labelOnly ? 1ULL : 0ULL));
 				HashMixWString(perWindowHash, style.boxName);
 				HashMix64(perWindowHash, rollingCoverageHash);
+				HashMix64(perWindowHash, (ULONGLONG)((wnd.exStyle & WS_EX_TOPMOST) ? 1ULL : 0ULL)); // force rebuild when topmost changes
 				HashMix64(perWindowHash, (ULONGLONG)(applyCaptureAffinity ? 1ULL : 0ULL)); // cover state change invalidates skip-rebuild
 				HashMix64(perWindowHash, (ULONGLONG)(excludeTaskbar ? 1ULL : 0ULL)); // per-box taskbar exclusion setting
 
@@ -1864,7 +1902,9 @@ void CBoxBorder::DrawAllSandboxedBorders()
 					// Build effective clip region: hrgnCovered plus taskbar areas if BorderExcludeTaskbar is set for this box.
 					HRGN hrgnEffective = hrgnCovered;
 					bool hrgnEffectiveOwned = false;
-					if (excludeTaskbar && hrgnTaskbar)
+					// Skip clipping when the window is topmost: it sits above the taskbar,
+					// so subtracting the taskbar region would misalign the border.
+					if (excludeTaskbar && hrgnTaskbar && !(wnd.exStyle & WS_EX_TOPMOST))
 					{
 						HRGN hrgnTemp = CreateRectRgn(0, 0, 0, 0);
 						if (hrgnTemp)
@@ -1963,7 +2003,9 @@ void CBoxBorder::DrawAllSandboxedBorders()
 							bwnd.affinityEnabled = applyCaptureAffinity;
 
 							// Keep steady-state z-order unless short focus pulse is active for this target.
-							bool raiseThisWindow = focusRaisePulseActive && (wnd.hWnd == focusedWnd);
+							bool focusedTopMost = (wnd.hWnd == focusedWnd) && ((wnd.exStyle & WS_EX_TOPMOST) != 0);
+							bool raiseThisWindow = (focusRaisePulseActive && (wnd.hWnd == focusedWnd)) || !bwnd.visible || focusedTopMost;
+							HWND raiseInsertAfter = (wnd.exStyle & WS_EX_TOPMOST) ? HWND_TOPMOST : HWND_TOP;
 							DWORD swpFlags = SWP_NOACTIVATE;
 							if (!raiseThisWindow)
 								swpFlags |= SWP_NOZORDER;
@@ -1988,7 +2030,7 @@ void CBoxBorder::DrawAllSandboxedBorders()
 
 							if (needSetWindowPos)
 							{
-								SetWindowPos(bwnd.hWnd, raiseThisWindow ? HWND_TOP : NULL,
+								SetWindowPos(bwnd.hWnd, raiseThisWindow ? raiseInsertAfter : NULL,
 									boundingRect.left,
 									boundingRect.top,
 									boundingRect.right - boundingRect.left,
@@ -2017,9 +2059,11 @@ void CBoxBorder::DrawAllSandboxedBorders()
 				else
 				{
 					// Hash unchanged: only optional focus pulse raise.
-					if (focusRaisePulseActive && (wnd.hWnd == focusedWnd)) {
+					bool focusedTopMost = (wnd.hWnd == focusedWnd) && ((wnd.exStyle & WS_EX_TOPMOST) != 0);
+					if ((focusRaisePulseActive && (wnd.hWnd == focusedWnd)) || focusedTopMost) {
 						ApplyCaptureExclusionAffinity(bwnd.hWnd, applyCaptureAffinity);
-						SetWindowPos(bwnd.hWnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+						HWND raiseInsertAfter = (wnd.exStyle & WS_EX_TOPMOST) ? HWND_TOPMOST : HWND_TOP;
+						SetWindowPos(bwnd.hWnd, raiseInsertAfter, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 					}
 				}
 				}

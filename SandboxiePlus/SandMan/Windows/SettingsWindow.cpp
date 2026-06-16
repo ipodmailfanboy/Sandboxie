@@ -22,6 +22,7 @@
 #include "Helpers/IniHighlighter.h"
 #include "../MiscHelpers/Common/CheckableMessageBox.h"
 #include <QFileIconProvider>
+#include <QRegularExpression>
 #include <QScreen>
 #include <QSet>
 
@@ -719,6 +720,7 @@ CSettingsWindow::CSettingsWindow(QWidget* parent)
 
 	connect(ui.chkSandboxMoTW, SIGNAL(stateChanged(int)), this, SLOT(OnMoTWChange()));
 	connect(ui.cmbMoTWSandbox, SIGNAL(currentIndexChanged(int)), this, SLOT(OnMoTWChange()));
+	connect(ui.chkForceBoxDocs, SIGNAL(stateChanged(int)), this, SLOT(OnOptChanged()));
 
 	// USB
 	connect(ui.chkSandboxUsb, SIGNAL(stateChanged(int)), this, SLOT(OnVolumeChanged()));
@@ -852,14 +854,16 @@ CSettingsWindow::CSettingsWindow(QWidget* parent)
 		m_pCodeEdit->SetCompleter(nullptr);
 	}
 	
-	m_pCodeEdit->SetCompletionFilterCallback([](const QString& keyName) -> bool {
-		return CIniHighlighter::IsKeyHiddenFromPopup(keyName);
+	m_pCodeEdit->SetCompletionFilterCallback([](const QString& keyName, const QString& inputKey) -> bool {
+		return CIniHighlighter::IsKeyHiddenFromPopup(keyName)
+			|| CIniHighlighter::ShouldHideCompletionCandidate(inputKey, keyName, 'p');
 		});
 	m_pCodeEdit->SetCaseCorrectionCallback([](const QString& wrongKey) -> QString {
 		return CIniHighlighter::FindCaseCorrectedKey(wrongKey);
 		});
-	m_pCodeEdit->SetCaseCorrectionFilterCallback([](const QString& keyName) -> bool {
-		return CIniHighlighter::IsKeyHiddenFromContext(keyName, 'c');
+	m_pCodeEdit->SetCaseCorrectionFilterCallback([](const QString& keyName, const QString& inputKey) -> bool {
+		return CIniHighlighter::IsKeyHiddenFromContext(keyName, 'c')
+			|| CIniHighlighter::ShouldHideCompletionCandidate(inputKey, keyName, 'c');
 		});
 	m_pCodeEdit->SetPopupTooltipCallback([](const QString& keyName) -> QString {
 		return CIniHighlighter::GetSettingTooltipForPopup(keyName);
@@ -1595,6 +1599,7 @@ void CSettingsWindow::LoadSettings()
 
 		QString MoTWBox = theAPI->GetGlobalSettings()->GetText("MarkOfTheWebBox", "Web_Box");
 		ui.chkSandboxMoTW->setChecked(theAPI->GetGlobalSettings()->GetBool("ForceMarkOfTheWeb", false));
+		ui.chkForceBoxDocs->setChecked(theAPI->GetGlobalSettings()->GetBool("ForceBoxDocs", false));
 		QString USBBox = theAPI->GetGlobalSettings()->GetText("UsbSandbox", "USB_Box");
 		ui.chkSandboxUsb->setChecked(theAPI->GetGlobalSettings()->GetBool("ForceUsbDrives", false));
 
@@ -1671,6 +1676,7 @@ void CSettingsWindow::LoadSettings()
 		ui.btnAddWarnProg->setEnabled(false);
 		ui.btnDelWarnProg->setEnabled(false);
 		ui.chkSandboxMoTW->setEnabled(false);
+		ui.chkForceBoxDocs->setEnabled(false);
 		ui.cmbMoTWSandbox->setEnabled(false);
 		ui.chkSandboxUsb->setEnabled(false);
 		ui.cmbUsbSandbox->setEnabled(false);
@@ -2227,6 +2233,7 @@ void CSettingsWindow::SaveSettings()
 			}
 
 			WriteAdvancedCheck(ui.chkSandboxMoTW, "ForceMarkOfTheWeb", "y", "");
+			WriteAdvancedCheck(ui.chkForceBoxDocs, "ForceBoxDocs", "y", "");
 
 			QString MoTWSandbox = ui.cmbMoTWSandbox->currentData().toString();
 			SB_STATUS Status = theAPI->ValidateName(MoTWSandbox);
@@ -3188,6 +3195,7 @@ void CSettingsWindow::LoadCertificate(QString CertPath)
 	}
 }
 
+#define GET_DAYS_FROM_SEC(sec) (((sec) + (60*60*24 - 1)) / (60*60*24))
 
 void CSettingsWindow::UpdateCert()
 {
@@ -3222,7 +3230,7 @@ void CSettingsWindow::UpdateCert()
 			QString infoMsg = tr("This supporter certificate has expired, please <a href=\"%1\">get an updated certificate</a>.").arg(ReNewUrl);
 			if (g_CertInfo.active) {
 				if (g_CertInfo.grace_period)
-					infoMsg.append(tr("<br /><font color='red'>Plus features will be disabled in %1 days.</font>").arg((g_CertInfo.expirers_in_sec + 30*60*60*24) / (60*60*24)));
+					infoMsg.append(tr("<br /><font color='red'>Plus features will be disabled in %1 days.</font>").arg(GET_DAYS_FROM_SEC(g_CertInfo.expirers_in_sec + 30*60*60*24)));
 				else if (!g_CertInfo.outdated) // must be an expiren medium or large cert on an old build
 					infoMsg.append(tr("<br /><font color='red'>For the current build Plus features remain enabled</font>, but you no longer have access to Sandboxie-Live services, including compatibility updates and the online troubleshooting database."));
 			} else
@@ -3232,7 +3240,7 @@ void CSettingsWindow::UpdateCert()
 		}
 		else {
 			if (g_CertInfo.expirers_in_sec > 0 && g_CertInfo.expirers_in_sec < (60 * 60 * 24 * 30)) {
-				ui.lblCertExp->setText(tr("This supporter certificate will <font color='red'>expire in %1 days</font>, please <a href=\"%2\">get an updated certificate</a>.").arg(g_CertInfo.expirers_in_sec / (60*60*24)).arg(ReNewUrl));
+				ui.lblCertExp->setText(tr("This supporter certificate will <font color='red'>expire in %1 days</font>, please <a href=\"%2\">get an updated certificate</a>.").arg(GET_DAYS_FROM_SEC(g_CertInfo.expirers_in_sec)).arg(ReNewUrl));
 				ui.lblCertExp->setVisible(true);
 			}
 			/*#ifdef _DEBUG
@@ -3267,9 +3275,9 @@ void CSettingsWindow::UpdateCert()
 
 		QString ExpInfo;
 		if(g_CertInfo.expirers_in_sec > 0)
-			ExpInfo = tr("Expires in: %1 days").arg(g_CertInfo.expirers_in_sec / (60*60*24));
+			ExpInfo = tr("Expires in: %1 days").arg(GET_DAYS_FROM_SEC(g_CertInfo.expirers_in_sec));
 		else if(g_CertInfo.expirers_in_sec < 0)
-			ExpInfo = tr("Expired: %1 days ago").arg(-g_CertInfo.expirers_in_sec / (60*60*24));
+			ExpInfo = tr("Expired: %1 days ago").arg(GET_DAYS_FROM_SEC(-g_CertInfo.expirers_in_sec));
 		if (CERT_IS_TYPE(g_CertInfo, eCertPatreon))
 			ExpInfo += tr("; eligible Patreons can always <a href=\"https://xanasoft.com/get-supporter-certificate/\">obtain an updated certificate</a> from xanasoft.com");
 		ui.lblCert->setText(ExpInfo);
@@ -3773,11 +3781,8 @@ void CSettingsWindow::OnEditorSettings()
 		
 		// Apply settings that don't have UI checkboxes in SettingsWindow
 		// These are managed via EditorSettings only
-		if (editorWindow.HasResetOccurred()) {
-			// If any reset occurred, update these settings from config
-			bool fuzzyEnabled = theConf->GetBool("Options/EnableFuzzyMatching", false);
-			m_pCodeEdit->SetFuzzyMatchingEnabled(fuzzyEnabled);
-		}
+		bool fuzzyEnabled = theConf->GetBool("Options/EnableFuzzyMatching", false);
+		m_pCodeEdit->SetFuzzyMatchingEnabled(fuzzyEnabled);
 		
 		// Always update autocompletion list regardless of reset status
 		UpdateAutoCompletion();
